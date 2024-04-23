@@ -1,26 +1,16 @@
-import torch
-from torch.utils.data import DataLoader, Dataset
-
-from tqdm import tqdm
-import json
-
-import torch.nn as nn
-from torchmetrics import MeanSquaredError, MeanAbsoluteError
-from torch.nn.utils.rnn import pad_sequence
-from torchmetrics import F1Score, Accuracy
-
-import lightning as L
 import random
 import pickle
 import numpy as np
 
-from torch.utils.data import DataLoader
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger
-
 from collections import Counter
 
-from utils import *
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+from torch.nn.utils.rnn import pad_sequence
+from torchmetrics import F1Score
+
+import lightning as L
 
 class PatientDataset(Dataset):
     def __init__(self, data, text2embedding, undersample=True):
@@ -37,17 +27,17 @@ class PatientDataset(Dataset):
         patient = self.data[idx]
         embeddings = []
 
-        for encounter in patient['encounters']:
+        for encounter in patient["encounters"]:
             # Fetch embeddings for each text piece
-            for key in ['Description', 'ReasonDescription']:
-                text = encounter['encounter'].get(key, '')
+            for key in ["Description", "ReasonDescription"]:
+                text = encounter["encounter"].get(key, "")
                 if text and text in self.text2embedding:
                     embeddings.append(self.text2embedding[text])
 
-            for item_type in ['conditions', 'careplans', 'procedures']:
+            for item_type in ["conditions", "careplans", "procedures"]:
                 for item in encounter[item_type]:
-                    for key in ['Description', 'ReasonDescription']:
-                        text = item.get(key, '')
+                    for key in ["Description", "ReasonDescription"]:
+                        text = item.get(key, "")
                         if text and text in self.text2embedding:
                             embeddings.append(self.text2embedding[text])
 
@@ -55,10 +45,10 @@ class PatientDataset(Dataset):
         embeddings_tensor = torch.stack(embeddings) if embeddings else torch.zeros(1, len(next(iter(self.text2embedding.values()))))
     
         return {
-            'embeddings': embeddings_tensor,  # a list of tensors
-            'features': torch.tensor([patient['lat'], patient['lon']]),
-            'label': int(patient["label"]),
-            'patient_id': patient['id']
+            "embeddings": embeddings_tensor,  # a list of tensors
+            "features": torch.tensor([patient["lat"], patient["lon"]]),
+            "label": int(patient["label"]),
+            "patient_id": patient["patient_id"]
         }
     
     def undersample_data(self, data):
@@ -71,65 +61,6 @@ class PatientDataset(Dataset):
         # Create a new list of data with balanced classes
         undersampled_data = []
         counts = {label: 0 for label in label_counts}  # track counts per class
-        for patient in data:
-            label = patient["label"]
-            if counts[label] < min_count:
-                undersampled_data.append(patient)
-                counts[label] += 1
-        return undersampled_data
-
-class PatientDatasetV2(Dataset):
-    def __init__(self, data, text2embedding, undersample=True):
-        self.text2embedding = text2embedding
-        self.embedding_dim = len(next(iter(text2embedding.values())))  # Assuming all embeddings have the same length
-        if undersample:
-            self.data = self.undersample_data(data)
-        else:
-            self.data = data
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        patient = self.data[idx]
-        patient_embeddings = {'encounters': []}
-
-        for encounter in patient['encounters']:
-            encounter_embedding = {'encounter': {}, 'conditions': [], 'careplans': [], 'procedures': []}
-
-            # Fetch embeddings for encounter
-            for key in ['Description', 'ReasonDescription']:
-                text = encounter['encounter'].get(key, '')
-                encounter_embedding['encounter'][key] = self.get_embedding(text)
-
-            # Fetch embeddings for items
-            for item_type in ['conditions', 'careplans', 'procedures']:
-                for item in encounter[item_type]:
-                    item_embeddings = {}
-                    for key in ['Description', 'ReasonDescription']:
-                        text = item.get(key, '')
-                        item_embeddings[key] = self.get_embedding(text)
-                    encounter_embedding[item_type].append(item_embeddings)
-
-            patient_embeddings['encounters'].append(encounter_embedding)
-
-        return {
-            'embeddings': patient_embeddings['encounters'],
-            'features': torch.tensor([patient['lat'], patient['lon']]),
-            'label': int(patient["label"])
-        }
-
-    def get_embedding(self, text):
-        if text and text in self.text2embedding:
-            return self.text2embedding[text]
-        else:
-            return torch.zeros(self.embedding_dim)  # Return zero vector if not found
-
-    def undersample_data(self, data):
-        label_counts = Counter(patient["label"] for patient in data)
-        min_count = min(label_counts.values())
-        undersampled_data = []
-        counts = {label: 0 for label in label_counts}
         for patient in data:
             label = patient["label"]
             if counts[label] < min_count:
@@ -153,233 +84,21 @@ def custom_pad(data):
         raise TypeError("Unsupported data type for padding")
     return padded_data
 
-def collate_fnV2(batch):
-    embeddings = [item['embeddings'] for item in batch]
-    features = torch.stack([item['features'] for item in batch])
-    labels = torch.tensor([int(item['label']) for item in batch])
-
-    # Pad embeddings manually for nested structure
-    embeddings_padded = custom_pad(embeddings)
-
-    return {
-        'embeddings': embeddings_padded,
-        'features': features,
-        'label': labels
-    }
-
 def collate_fn(batch):
-    embeddings = [item['embeddings'] for item in batch]
-    features = torch.stack([item['features'] for item in batch])
-    labels = torch.tensor([int(item['label']) for item in batch])
-    ids = [item['id'] for item in batch]
+    embeddings = [item["embeddings"] for item in batch]
+    features = torch.stack([item["features"] for item in batch])
+    labels = torch.tensor([int(item["label"]) for item in batch])
+    ids = [item["patient_id"] for item in batch]
 
     # Pad the embeddings sequences
     embeddings_padded = pad_sequence(embeddings, batch_first=True)
 
     return {
-        'embeddings': embeddings_padded,
-        'features': features,
-        'label': labels,
-        'patient_id': ids
+        "embeddings": embeddings_padded,
+        "features": features,
+        "label": labels,
+        "patient_id": ids
     }
-
-class EncounterAutoencoder(nn.Module):
-    def __init__(self, embedding_dim=768, hidden_dim=128):
-        super(EncounterAutoencoder, self).__init__()
-        self.lstm = nn.LSTM(embedding_dim, hidden_dim, num_layers=20, batch_first=True)
-        # self.attention = nn.MultiheadAttention(hidden_dim, num_heads=4, batch_first=True)
-
-    def forward(self, x):
-        output, (hidden, cell) = self.lstm(x)
-        return hidden[-1]  # Taking the last hidden state as the representation
-
-        attn_output, _ = self.attention(output, output, output)
-        return attn_output.mean(dim=1)  # Aggregate attention output
-
-class EncounterAutoencoderV2(nn.Module):
-    def __init__(self, embedding_dim=768, hidden_dim=128, output_dim=128):
-        super(EncounterAutoencoderV2, self).__init__()
-        self.embedding_dim = embedding_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        
-        # Define LSTMs for different parts of an encounter
-        self.encounter_lstm = nn.LSTM(embedding_dim, hidden_dim, batch_first=True)
-        self.conditions_lstm = nn.LSTM(embedding_dim, hidden_dim // 2, batch_first=True)
-        self.careplans_lstm = nn.LSTM(embedding_dim, hidden_dim // 2, batch_first=True)
-        self.procedures_lstm = nn.LSTM(embedding_dim, hidden_dim // 2, batch_first=True)
-
-        # A linear layer to merge all different LSTM outputs
-        self.fc = nn.Linear(hidden_dim + 3 * (hidden_dim // 2), output_dim)
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        # Assuming x is a dict with structure given by the new dataset format
-        encounter_out, _ = self.encounter_lstm(x['encounter'])
-        conditions_out, _ = self.conditions_lstm(torch.cat(x['conditions'], dim=0))
-        careplans_out, _ = self.careplans_lstm(torch.cat(x['careplans'], dim=0))
-        procedures_out, _ = self.procedures_lstm(torch.cat(x['procedures'], dim=0))
-
-        # Taking the last hidden state as the representation
-        encounter_rep = encounter_out[:, -1, :]
-        conditions_rep = conditions_out[:, -1, :]
-        careplans_rep = careplans_out[:, -1, :]
-        procedures_rep = procedures_out[:, -1, :]
-
-        # Concatenate all outputs
-        concatenated = torch.cat((encounter_rep, conditions_rep, careplans_rep, procedures_rep), dim=1)
-        
-        # Pass through a final linear layer
-        final_output = self.fc(concatenated)
-        final_output = self.relu(final_output)
-
-        return final_output
-
-class PatientAutoencoderV2(L.LightningModule):
-    def __init__(self, embedding_dim=768, hidden_dim=128, patient_latent_dim=64, output_dim=128):
-        super(PatientAutoencoderV2, self).__init__()
-        self.save_hyperparameters()
-        self.encounter_autoencoder = EncounterAutoencoderV2(embedding_dim, hidden_dim, output_dim)
-        self.patient_encoder = nn.Sequential(
-            nn.Linear(output_dim, patient_latent_dim),  # Adjusted to match EncounterAutoencoder's output
-            nn.ReLU(),
-            nn.Dropout(0.25)
-        )
-        self.patient_decoder = nn.Sequential(
-            nn.Linear(patient_latent_dim, output_dim),  # Ensure the output dimension matches the encoder's input
-            nn.ReLU(),
-            nn.Dropout(0.25)
-        )
-
-        self.train_mse = nn.MSELoss()
-        self.val_mse = nn.MSELoss()
-        self.test_mse = nn.MSELoss()
-
-        self.train_mae = nn.L1Loss()
-        self.val_mae = nn.L1Loss()
-        self.test_mae = nn.L1Loss()
-
-    def forward(self, x):
-        encounter_representation = self.encounter_autoencoder(x['embeddings'])
-        patient_encoded = self.patient_encoder(encounter_representation)
-        patient_decoded = self.patient_decoder(patient_encoded)
-        return patient_decoded
-
-    # Adjust the common step to match the new structure
-    def _common_step(self, batch, batch_idx, loss_metric, acc_metric, loss_lbl, metric_lbl):
-        embeddings = batch['embeddings']
-        logits = self.forward(embeddings)
-        labels = self.encounter_autoencoder(embeddings)
-
-        loss = loss_metric(logits, labels)
-        self.log(loss_lbl, loss, prog_bar=True)
-        self.log(metric_lbl, acc_metric(logits, labels), prog_bar=True)
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        return self._common_step(batch, batch_idx, self.train_mse, self.train_mae, "train_mse", "train_mae")
-
-    def on_training_epoch_end(self):
-        self.log("train_mse", self.train_mse.compute(), sync_dist=True)
-        self.log("train_mae", self.train_mae.compute(), sync_dist=True)
-        self.train_mse.reset()
-        self.train_mae.reset()
-
-    def validation_step(self, batch, batch_idx):
-        return self._common_step(batch, batch_idx, self.val_mse, self.val_mae, "val_mse", "val_mae")
-
-    def on_validation_epoch_end(self):
-        self.log("val_mse", self.val_mse.compute(), sync_dist=True)
-        self.log("val_mae", self.val_mae.compute(), sync_dist=True)
-        self.val_mse.reset()
-        self.val_mae.reset()
-
-    def test_step(self, batch, batch_idx):
-        return self._common_step(batch, batch_idx, self.val_mse, self.val_mae, "test_mse", "test_mae")
-
-    def on_test_epoch_end(self):
-        self.log("test_mse", self.test_mse.compute(), sync_dist=True)
-        self.log("test_mae", self.test_mae.compute(), sync_dist=True)
-        self.test_mse.reset()
-        self.test_mae.reset()
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.0001)
-        return optimizer
-
-class PatientAutoencoder(L.LightningModule):
-    def __init__(self, embedding_dim=768, hidden_dim=128, patient_latent_dim=64):
-        super(PatientAutoencoder, self).__init__()
-        self.save_hyperparameters()
-        self.encounter_autoencoder = EncounterAutoencoder(embedding_dim, hidden_dim)
-        self.patient_encoder = nn.Sequential(
-            nn.Linear(hidden_dim, patient_latent_dim),
-            nn.ReLU(),
-            nn.Dropout(0.25)
-        )
-        self.patient_decoder = nn.Sequential(
-            nn.Linear(patient_latent_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.25)
-        )
-
-        self.train_mse = MeanSquaredError()
-        self.val_mse = MeanSquaredError()
-        self.test_mse = MeanSquaredError()
-
-        self.train_mae = MeanAbsoluteError()
-        self.val_mae = MeanAbsoluteError()
-        self.test_mae = MeanAbsoluteError()
-
-    def forward(self, x):
-
-        encounter_representation = self.encounter_autoencoder(x['embeddings'])
-        patient_encoded = self.patient_encoder(encounter_representation)
-        patient_decoded = self.patient_decoder(patient_encoded)
-
-        return patient_decoded
-    
-    def _common_step(self, batch, batch_idx, loss_metric, acc_metric, loss_lbl, metric_lbl):
-
-        X = batch
-        logits = self.forward(X)
-
-        loss = loss_metric(logits, self.encounter_autoencoder(X["embeddings"]))
-
-        self.log(loss_lbl, loss, prog_bar=True, sync_dist=True)
-        self.log(metric_lbl, acc_metric(logits, self.encounter_autoencoder(X["embeddings"])), prog_bar=True, sync_dist=True)
-
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        return self._common_step(batch, batch_idx, self.train_mse, self.train_mae, "train_mse", "train_mae")
-
-    def on_training_epoch_end(self):
-        self.log("train_mse", self.train_mse.compute(), sync_dist=True)
-        self.log("train_mae", self.train_mae.compute(), sync_dist=True)
-        self.train_mse.reset()
-        self.train_mae.reset()
-
-    def validation_step(self, batch, batch_idx):
-        return self._common_step(batch, batch_idx, self.val_mse, self.val_mae, "val_mse", "val_mae")
-
-    def on_validation_epoch_end(self):
-        self.log("val_mse", self.val_mse.compute(), sync_dist=True)
-        self.log("val_mae", self.val_mae.compute(), sync_dist=True)
-        self.val_mse.reset()
-        self.val_mae.reset()
-
-    def test_step(self, batch, batch_idx):
-        return self._common_step(batch, batch_idx, self.val_mse, self.val_mae, "test_mse", "test_mae")
-
-    def on_test_epoch_end(self):
-        self.log("test_mse", self.test_mse.compute(), sync_dist=True)
-        self.log("test_mae", self.test_mae.compute(), sync_dist=True)
-        self.test_mse.reset()
-        self.test_mae.reset()
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.0001)
-        return optimizer
 
 def split_list(input_list, split_ratios):
     total_length = len(input_list)
@@ -396,76 +115,18 @@ def split_list(input_list, split_ratios):
 
     return splits
 
-class PatientClassifier(L.LightningModule):
-    def __init__(self, encoder, hidden_dim):
-        super().__init__()
-
-        self.encoder = encoder
-        for param in self.encoder.parameters():
-            param.requires_grad = False
-
-        self.classifier = nn.Linear(hidden_dim, 1)
-
-        self.val_acc = Accuracy(task="binary")
-        self.test_acc = Accuracy(task="binary")
-        self.train_acc = Accuracy(task="binary")
-        self.loss_function = nn.BCEWithLogitsLoss()
-
-    def forward(self, x):
-        encoded_features = self.encoder(x)
-        logits = self.classifier(encoded_features)
-        return logits
-
-    def _common_step(self, batch, batch_idx, metric, loss_lbl, metric_lbl):
-        x, y = batch["embeddings"], batch["label"]
-
-        logits = self.forward(x)
-        loss = self.loss_function(logits.view(-1), y.float())  # Ensure y is float and logits are reshaped appropriately
-
-        preds = torch.sigmoid(logits) > 0.5  # Calculate predictions based on the sigmoid threshold
-        metric(preds.view(-1), y)  # Update metric
-        
-        self.log(loss_lbl, loss, prog_bar=True)
-        self.log(metric_lbl, metric.compute(), prog_bar=True)
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        return self._common_step(batch, batch_idx, self.train_acc, "train_loss", "train_acc")
-
-    def on_training_epoch_end(self):
-        self.log("train_acc", self.train_acc.compute())
-        self.train_acc.reset()
-
-    def validation_step(self, batch, batch_idx):
-        return self._common_step(batch, batch_idx, self.val_acc, "val_loss", "val_acc")
-
-    def on_validation_epoch_end(self):
-        self.log("val_acc", self.val_acc.compute())
-        self.val_acc.reset()
-
-    def test_step(self, batch, batch_idx):
-        return self._common_step(batch, batch_idx, self.test_acc, "test_loss", "test_acc")
-
-    def on_test_epoch_end(self):
-        self.log("test_acc", self.test_acc.compute())
-        self.test_acc.reset()
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.classifier.parameters(), lr=0.0001)
-        return optimizer
-
-def dataloader_to_numpy(dataloader, pooling='mean'):
+def dataloader_to_numpy(dataloader, pooling="mean"):
     """Convert a PyTorch DataLoader to NumPy arrays with optional pooling."""
     X_list, y_list = [], []
     
     # Loop over the DataLoader
     for batch in dataloader:
-        X, y = batch['embeddings'], batch['label']
+        X, y = batch["embeddings"], batch["label"]
         
         # Check the desired pooling method
-        if pooling == 'mean':
+        if pooling == "mean":
             X = X.mean(dim=1)  # Pooling over the sequence dimension
-        elif pooling == 'max':
+        elif pooling == "max":
             X = X.max(dim=1).values  # Pooling over the sequence dimension
         
         # Convert PyTorch tensors to NumPy arrays
@@ -482,9 +143,9 @@ def dataloader_to_numpy(dataloader, pooling='mean'):
     
     return X_full, y_full
 
-def load_data(data, batch_sizes=(20, 20, 20), model_type="dl"):
+def load_data(data, batch_sizes=(30, 30, 20), model_type="dl"):
     ### load embeddings ###
-    with open('data/text2embeddings.pkl', 'rb') as f:
+    with open("data/text2embeddings.pkl", "rb") as f:
         text2embeddings = pickle.load(f)
 
     train_bs, val_bs, test_bs = batch_sizes
@@ -527,9 +188,9 @@ def load_data(data, batch_sizes=(20, 20, 20), model_type="dl"):
         val_dl = DataLoader(val_ds, batch_size=val_bs, collate_fn=collate_fn, num_workers=5, persistent_workers=True)
         test_dl = DataLoader(test_ds, batch_size=test_bs, collate_fn=collate_fn, num_workers=5)
 
-        train_X, train_y = dataloader_to_numpy(train_dl, pooling='mean')
-        val_X, val_y = dataloader_to_numpy(val_dl, pooling='mean')
-        test_X, test_y = dataloader_to_numpy(test_dl, pooling='mean')
+        train_X, train_y = dataloader_to_numpy(train_dl, pooling="mean")
+        val_X, val_y = dataloader_to_numpy(val_dl, pooling="mean")
+        test_X, test_y = dataloader_to_numpy(test_dl, pooling="mean")
         return train_X, train_y, val_X, val_y, test_X, test_y, (train_data, val_data, test_data)
     else:
         train_data += val_data
@@ -545,41 +206,11 @@ def load_data(data, batch_sizes=(20, 20, 20), model_type="dl"):
         train_dl = DataLoader(train_ds, batch_size=train_bs, shuffle=True, collate_fn=collate_fn, num_workers=5, persistent_workers=True)
         test_dl = DataLoader(test_ds, batch_size=test_bs, collate_fn=collate_fn, num_workers=5)
 
-        train_X, train_y = dataloader_to_numpy(train_dl, pooling='mean')
-        test_X, test_y = dataloader_to_numpy(test_dl, pooling='mean')
+        train_X, train_y = dataloader_to_numpy(train_dl, pooling="mean")
+        test_X, test_y = dataloader_to_numpy(test_dl, pooling="mean")
         return train_X, train_y, test_X, test_y, (train_data, test_data)
 
-
-
-def load_dataV2(data, batch_sizes=(20, 20, 20)):
-    train_bs, val_bs, test_bs = batch_sizes
-    split_ratios = [0.7, 0.15, 0.15]
-
-    random.shuffle(data)
-    train_data, val_data, test_data = split_list(data, split_ratios)
-
-    print(f"""
-    train: {len(train_data)}
-    val: {len(val_data)}
-    test: {len(test_data)}
-    """)
-
-    ### load embeddings ###
-    with open('data/text2embeddings.pkl', 'rb') as f:
-        text2embeddings = pickle.load(f)
-
-    ### setup dataloaders ###
-    train_ds = PatientDatasetV2(train_data, text2embeddings)
-    val_ds = PatientDatasetV2(val_data, text2embeddings, undersample=False)
-    test_ds = PatientDatasetV2(test_data, text2embeddings, undersample=False)
-
-    train_dl = DataLoader(train_ds, batch_size=train_bs, shuffle=True, collate_fn=collate_fnV2, num_workers=5, persistent_workers=True)
-    val_dl = DataLoader(val_ds, batch_size=val_bs, collate_fn=collate_fnV2, num_workers=5, persistent_workers=True)
-    test_dl = DataLoader(test_ds, batch_size=test_bs, collate_fn=collate_fnV2, num_workers=5)
-
-    return train_dl, val_dl, test_dl, (train_data, val_data, test_data)
-
-def extract_features(dataloader, encoder, device='cuda'):
+def extract_features(dataloader, encoder, device="cuda"):
     features = []
     labels = []
 
@@ -589,7 +220,7 @@ def extract_features(dataloader, encoder, device='cuda'):
 
     with torch.no_grad():
         for data in dataloader:
-            inputs, targets = data['embeddings'].to(device), data['label']  # Move inputs to GPU
+            inputs, targets = data["embeddings"].to(device), data["label"]  # Move inputs to GPU
             feature = encoder(inputs)
             features.append(feature.cpu().numpy())  # Move features back to CPU and convert to numpy
             labels.append(targets.numpy())
@@ -598,3 +229,148 @@ def extract_features(dataloader, encoder, device='cuda'):
     labels = np.hstack(labels)
 
     return features, labels
+
+class FC(L.LightningModule):
+    def __init__(self, embedding_dim=768, hidden_dim=128, output_dim=1, batch_sizes=(30,30,20), agg_type="logits_max"):
+        super(FC, self).__init__()
+
+        self.fc1 = nn.Linear(embedding_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, output_dim)
+
+        self.loss_fn = nn.BCEWithLogitsLoss()
+
+        self.train_acc = F1Score(task="binary")
+        self.val_acc = F1Score(task="binary")
+        self.test_acc = F1Score(task="binary")
+
+        self.train_bs, self.val_bs, self.test_bs = batch_sizes
+
+        self.agg_type = agg_type
+
+    def forward(self, x):
+        if self.agg_type == "sequence_mean":
+            x = torch.mean(x, dim=1)  # average over the sequence length
+
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)  # no activation - BCEWithLogitsLoss applies sigmoid
+        return x
+
+    def _common_step(self, batch, batch_idx, acc_metric):
+        x, y = batch['embeddings'], batch['label']
+        logits = self(x).squeeze(-1)  # remove the last singleton dimension if it exists
+
+        if self.agg_type == "logits_mean":
+            logits = logits.mean(dim=1)  # mean aggregation
+        elif self.agg_type == "logits_max":
+            logits = logits.max(dim=1).values  # max aggregation
+
+        loss = self.loss_fn(logits, y.type_as(logits))
+        acc_metric.update(logits.sigmoid(), y)
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        loss = self._common_step(batch, batch_idx, self.train_acc)
+        self.log('train_loss', loss, prog_bar=True, sync_dist=True, on_step=True, on_epoch=True, batch_size=self.train_bs)
+        self.log('train_acc', self.train_acc.compute(), on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=self.train_bs)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        loss = self._common_step(batch, batch_idx, self.val_acc)
+        self.log('val_loss', loss, prog_bar=True, sync_dist=True, on_step=True, on_epoch=True, batch_size=self.val_bs)
+        self.log('val_acc', self.val_acc.compute(), on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=self.val_bs)
+        return loss
+
+    def test_step(self, batch, batch_idx):
+        loss = self._common_step(batch, batch_idx, self.test_acc)
+        self.log('test_loss', loss, sync_dist=True, on_step=True, on_epoch=True, batch_size=self.test_bs)
+        self.log('test_acc', self.test_acc.compute(), on_step=True, on_epoch=True, sync_dist=True, batch_size=self.test_bs)
+        return loss
+
+    def on_train_epoch_end(self):
+        self.train_acc.reset()
+
+    def on_validation_epoch_end(self):
+        self.val_acc.reset()
+
+    def on_test_epoch_end(self):
+        self.test_acc.reset()
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
+        return optimizer
+
+class AttentionModelV2(L.LightningModule):
+    def __init__(self, embedding_dim=768, hidden_dim=128, output_dim=1, num_heads=6, batch_size=(30,30,20)):
+        super(AttentionModelV2, self).__init__()
+        self.embedding_dim = embedding_dim
+        self.hidden_dim = hidden_dim
+
+        self.attention_layer = nn.MultiheadAttention(embed_dim=embedding_dim, num_heads=num_heads)
+
+        self.fc1 = nn.Linear(embedding_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+
+        self.loss_fn = nn.BCEWithLogitsLoss()
+
+        self.train_acc = F1Score(task="binary")
+        self.val_acc = F1Score(task="binary")
+        self.test_acc = F1Score(task="binary")
+
+        self.train_bs, self.val_bs, self.test_bs = batch_size
+
+    def forward(self, x):
+        # x shape expected: [batch_size, seq_len, embedding_dim]
+        x = x.permute(1, 0, 2)  # Now x is [seq_len, batch_size, embedding_dim]
+        
+        # apply attention
+        query = x.mean(dim=0, keepdim=True)  # Reduce over sequence length, keep batch dimension
+        attended_features, _ = self.attention_layer(query, x, x)
+        
+        # Reverting dimensions to match the linear layers
+        attended_features = attended_features.permute(1, 0, 2)  # Back to [batch_size, seq_len, embedding_dim]
+        # Optionally, flatten or pool the sequence dimension before passing to fully connected layers
+        attended_features = attended_features.mean(dim=1)
+
+        x = F.relu(self.fc1(attended_features))
+        x = self.fc2(x)
+        return x
+
+    def _common_step(self, batch, batch_idx, acc_metric):
+        x, y = batch['embeddings'], batch['label']
+        logits = self(x).squeeze()
+        loss = self.loss_fn(logits, y.type_as(logits))
+        acc_metric.update(logits.sigmoid(), y)
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        loss = self._common_step(batch, batch_idx, self.train_acc)
+        self.log('train_loss', loss, prog_bar=True, sync_dist=True, on_step=True, on_epoch=True, batch_size=self.train_bs)
+        self.log('train_acc', self.train_acc.compute(), on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=self.train_bs)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        loss = self._common_step(batch, batch_idx, self.val_acc)
+        self.log('val_loss', loss, prog_bar=True, sync_dist=True, on_step=True, on_epoch=True, batch_size=self.val_bs)
+        self.log('val_acc', self.val_acc.compute(), on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=self.val_bs)
+        return loss
+
+    def test_step(self, batch, batch_idx):
+        loss = self._common_step(batch, batch_idx, self.test_acc)
+        self.log('test_loss', loss, sync_dist=True, on_step=True, on_epoch=True, batch_size=self.test_bs)
+        self.log('test_acc', self.test_acc.compute(), on_step=True, on_epoch=True, sync_dist=True, batch_size=self.test_bs)
+        return loss
+
+    def on_train_epoch_end(self):
+        self.train_acc.reset()
+
+    def on_validation_epoch_end(self):
+        self.val_acc.reset()
+
+    def on_test_epoch_end(self):
+        self.test_acc.reset()
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
+        return optimizer
