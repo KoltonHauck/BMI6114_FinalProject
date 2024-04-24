@@ -12,6 +12,97 @@ from torchmetrics import F1Score
 
 import lightning as L
 
+synthea_table_information = {
+    "allergies.csv": 
+        {
+            "columns": ["Start", "Stop", "Patient", "Encounter", "Code", "System", "Description", "Type", "Category", "Reaction1", "Description1", "Severity1", "Reaction2", "Description2", "Severity2"]
+        },
+    "careplans.csv": 
+        {
+            "columns":["Id", "Start", "Stop", "Patient", "Encounter", "Code", "Description", "ReasonCode", "ReasonDescription"],
+            "description_columns": ["Description", "ReasonDescription"],
+            "code_description_pairs": [["Code", "Description"], ["ReasonCode", "ReasonDescription"]]
+        },
+    "claims.csv": 
+        {
+            "columns": ["Id", "Patient ID", "Provider ID", "Primary Patient Insurance ID", "Secondary Patient Insurance ID", "Department ID", "Patient Department ID", "Diagnosis1", "Diagnosis2", "Diagnosis3", "Diagnosis4", "Diagnosis5", "Diagnosis6", "Diagnosis7", "Diagnosis8", "Referring Provider ID", "Appointment ID", "Current Illness Date", "Service Date", "Supervising Provider ID", "Status1", "Status2", "StatusP", "Outstanding1", "Outstanding2", "OutstandingP", "LastBilledDate1", "LastBilledDate2", "LastBilledDateP", "HealthcareClaimTypeID1", "HealthcareClaimTypeID2"]
+        },
+    "claims_transactions.csv": 
+        {
+            "columns": ["Id", "Claim ID", "Charge ID", "Patient ID", "Type", "Amount", "Method", "From Date", "To Date", "Place of Service", "Procedure Code", "Modifier1", "Modifier2", "DiagnosisRef1", "DiagnosisRef2", "DiagnosisRef3", "DiagnosisRef4", "Units", "Department ID", "Notes", "Unit Amount", "Transfer Out ID", "Transfer Type", "Payments", "Adjustments", "Transfers", "Outstanding", "Appointment ID", "Line Note", "Patient Insurance ID", "Fee Schedule ID", "Provider ID", "Supervising Provider ID"]
+        },
+    "conditions.csv": 
+        {
+            "columns": ["Start", "Stop", "Patient", "Encounter", "Code", "Description"],
+            "description_columns": ["Description"],
+            "code_description_pairs": [["Code", "Description"]]
+        },
+    "devices.csv": 
+        {
+            "columns": ["Start", "Stop", "Patient", "Encounter", "Code", "Description", "UDI"],
+            "description_columns": ["Description"],
+            "code_description_pairs": [["Code", "Description"]]
+        },
+    "encounters.csv": 
+        {
+            "columns": ["Id", "Start", "Stop", "Patient", "Organization", "Provider", "Payer", "EncounterClass", "Code", "Description", "Base_Encounter_Cost", "Total_Claim_Cost", "Payer_Coverage", "ReasonCode", "ReasonDescription"],
+            "description_columns": ["Description", "ReasonDescription"],
+            "code_description_pairs": [["Code", "Description"], ["ReasonCode", "ReasonDescription"]]
+        },
+    "imaging_studies.csv": 
+        {
+            "columns": ["Id", "Date", "Patient", "Encounter", "Series UID", "Body Site Code", "Body Site Description", "Modality Code", "Modality Description", "Instance UID", "SOP Code", "SOP Description", "Procedure Code"],
+            "description_columns": ["Body Site Description", "SOP Description"],
+            "code_description_pairs": [["Body Site Code", "Body Site Description"], ["SOP Code", "SOP Description"]]
+        },
+    "immunizations.csv": 
+        {
+            "columns":["Date", "Patient", "Encounter", "Code", "Description", "Cost"]
+        },
+    "medications.csv": 
+        {
+            "columns": ["Start", "Stop", "Patient", "Payer", "Encounter", "Code", "Description", "Base_Cost", "Payer_Coverage", "Dispenses", "TotalCost", "ReasonCode", "ReasonDescription"]
+        },
+    "observations.csv": 
+        {
+            "columns": ["Date", "Patient", "Encounter", "Category", "Code", "Description", "Value", "Units", "Type"]
+        },
+    "organizations.csv": 
+        {
+            "columns": ["Id", "Name", "Address", "City", "State", "Zip", "Lat", "Lon", "Phone", "Revenue", "Utilization"]
+        },
+    "patients.csv": 
+        {
+            "columns": ["Id", "BirthDate", "DeathDate", "SSN", "Drivers", "Passport", "Prefix", "First", "Last", "Suffix", "Maiden", "Marital", "Race", "Ethnicity", "Gender", "BirthPlace", "Address", "City", "State", "County", "FIPS County Code", "Zip", "Lat", "Lon", "Healthcare_Expenses", "Healthcare_Coverage", "Income"]
+        },
+    "payer_transitions.csv": 
+        {
+            "columns": ["Patient", "Member ID", "Start_Year", "End_Year", "Payer", "Secondary Payer", "Ownership", "Owner Name"]
+        },
+    "payers.csv": 
+        {
+            "columns": ["Id","Name","Address","City","State_Headquartered","Zip","Phone","Amount_Covered","Amount_Uncovered","Revenue","Covered_Encounters","Uncovered_Encounters","Covered_Medications","Uncovered_Medications","Covered_Procedures","Uncovered_Procedures","Covered_Immunizations","Uncovered_Immunizations","Unique_Customers","QOLS_Avg","Member_Months", "?"]
+        },
+    "procedures.csv": 
+        {
+            "columns": ["Start","Stop","Patient","Encounter","Code","Description","Base_Cost","ReasonCode","ReasonDescription"],
+            "description_columns": ["Description", "ReasonDescription"],
+            "code_description_pairs": [["Code", "Description"], ["ReasonCode", "ReasonDescription"]]
+        },
+    "providers.csv": 
+        {
+            "columns": ["Id","Organization", "Name", "Gender", "Speciality", "Address", "City", "State", "Zip", "Lat", "Lon", "Utilization", "?"]
+        },
+    "supplies.csv": 
+        {
+            "columns": ["Date", "Patient", "Encounter", "Code", "Description", "Quantity"]
+        }
+}
+
+def remove_text_inside_parentheses(text):
+    # Regular expression to match any text within parentheses
+    return re.sub(r'\s*\([^)]*\)', '', text)
+
 class PatientDataset(Dataset):
     def __init__(self, data, text2embedding, undersample=True):
         self.text2embedding = text2embedding

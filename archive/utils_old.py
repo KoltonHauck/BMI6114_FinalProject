@@ -427,3 +427,127 @@ class PatientDatasetV2(Dataset):
                 counts[label] += 1
         return undersampled_data
 
+def embed_descriptions(desc2code, model_directory, batch_size=32):
+    """ Given a dictionary of SNOMED code:description k:v pairs, and an embedding model (IE BERT), returns a dict of description:embedding of each code"""
+    tokenizer = BertTokenizer.from_pretrained(model_directory)
+
+    descriptions = list(desc2code.keys())
+
+    # Load pre-trained model (weights)
+    model = BertModel.from_pretrained(model_directory)
+    model.eval()  # Put the model in "evaluation" mode, which turns off dropout
+    print(f"model loaded | generating embeddings with bs={batch_size}")
+
+    inputs = tokenizer(descriptions, padding=True, truncation=True, return_tensors="pt", max_length=64)
+    # Assuming you have enough memory, process the entire list in batches
+    embeddings = []
+
+    # Process in batches with tqdm for progress tracking
+    for i in tqdm(range(0, len(descriptions), batch_size), desc="Generating Embeddings"):
+        batch = inputs[i:i+batch_size]
+        with torch.no_grad():
+            outputs = model(**batch)
+
+        # Extract pooled output embeddings
+        batch_embeddings = outputs.pooler_output
+        embeddings.append(batch_embeddings)
+
+    # Concatenate batched embeddings
+    embeddings = torch.cat(embeddings, dim=0)
+
+    return {descriptions[i]: embeddings[i] for i in range(len(descriptions))}
+
+def get_code2desc_dict(path_to_synthea_folder, synthea_table_information):
+    """ Given path to folder containing synthea dataset, and synthea_table_information_dict, return dictionary of all SNOMED code:description pairs"""
+    code2description = {}
+    description2code = {}
+
+    for table_name, table_data in synthea_table_information.items():
+        print(f"processing {table_name}")
+        df = pd.read_csv(os.path.join(path_to_synthea_folder, table_name), header=None, dtype=str)
+        df.columns = table_data["columns"]
+
+        for pair in table_data.get("code_description_pairs", []):
+            tmp_df = df[pair].dropna()
+
+            tmp_df[pair[1]] = tmp_df[pair[1]].apply(remove_text_inside_parentheses)
+
+            if tmp_df.empty:
+                continue
+
+            description2code.update(pd.Series(tmp_df[pair[0]].values, index=tmp_df[pair[1]]).to_dict())
+            code2description.update(pd.Series(tmp_df[pair[1]].values, index=tmp_df[pair[0]]).to_dict())
+
+    return code2description, description2code
+
+def get_average_embeddings(df, description_columns, desc2embeddings):
+    embeddings = {}
+    
+    for col in description_columns:
+        tmp_emb = [desc2embeddings[desc] for desc in df[col] if desc != ""]
+        if tmp_emb:
+            emb_torch = torch.stack(tmp_emb)
+            flattened_emb = emb_torch.mean(dim=0)
+            embeddings[col] = flattened_emb
+        else:
+            embeddings[col] = torch.zeros(768)
+
+    return embeddings
+
+class GRUEncoderWithAttention(nn.Module):
+    def __init__(self, embedding_dim, hidden_dim):
+        super(GRUEncoderWithAttention, self).__init__()
+        self.gru = nn.GRU(embedding_dim, hidden_dim, batch_first=True)
+        self.attention = Attention(hidden_dim)
+        self.hidden_dim = hidden_dim
+
+    def forward(self, x, mask=None):  # Add mask as an optional argument
+        # x is a batch of sequences of embeddings: shape (batch_size, seq_length, embedding_dim)
+        gru_outputs, _ = self.gru(x)  # gru_outputs shape: (batch_size, seq_length, hidden_dim)
+        
+        # Apply attention, passing the mask to the attention mechanism
+        context_vector, attention_weights = self.attention(gru_outputs, mask)
+        return context_vector, attention_weights
+
+class Attention(nn.Module):
+    def __init__(self, hidden_dim):
+        super(Attention, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.linear = nn.Linear(hidden_dim, 1)
+
+    def forward(self, gru_outputs, mask=None):
+        # gru_outputs shape: [batch_size, seq_length, hidden_dim]
+        energies = self.linear(gru_outputs).squeeze(-1)  # [batch_size, seq_length]
+
+        if mask is not None:
+            energies = energies.masked_fill(mask == 0, float('-inf'))  # Masking with -inf before softmax
+
+        attention_weights = nn.functional.softmax(energies, dim=1)
+        context_vector = torch.bmm(attention_weights.unsqueeze(1), gru_outputs).squeeze(1)
+
+        return context_vector, attention_weights
+
+def vectorize_encounters(encounters_df, procedures_df, desc2embeddings, synthea_table_information):
+    """ Function to vectorize patient information """
+    
+    enc_vectors = []
+
+    encounter_ids = encounters_df.Id.to_list()
+    for encounter_id in encounter_ids: # iter over encounters
+        curr_encounter_vector = []
+
+        # add vectorized encounter data
+        curr_encounter = encounters_df[encounters_df.Id == encounter_id]
+        encounter_embeddings = get_average_embeddings(curr_encounter, synthea_table_information["encounters.csv"]["description_columns"], desc2embeddings)
+        for emb in encounter_embeddings.values():
+            curr_encounter_vector.extend(emb)
+
+        # add vectorized procedures
+        encounter_procedures = procedures_df[procedures_df["Encounter"] == encounter_id]
+        procedure_embeddings = get_average_embeddings(encounter_procedures, synthea_table_information["procedures.csv"]["description_columns"], desc2embeddings)
+        for emb in procedure_embeddings.values():
+            curr_encounter_vector.extend(emb)
+
+        enc_vectors.append(torch.tensor(curr_encounter_vector))
+
+    return torch.stack(enc_vectors, dim=0)
